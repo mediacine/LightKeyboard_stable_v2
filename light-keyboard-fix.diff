@@ -1,0 +1,197 @@
+diff -ruN a/app/src/main/java/com/expressive/keyboard/Languages.kt b/app/src/main/java/com/expressive/keyboard/Languages.kt
+--- a/app/src/main/java/com/expressive/keyboard/Languages.kt	2026-10-31 03:33:27.375936157 +0000
++++ b/app/src/main/java/com/expressive/keyboard/Languages.kt	2026-10-31 03:33:35.038824293 +0000
+@@ -603,9 +603,14 @@
+ 
+ // ----------------------------------------------------------------------------- Telex
+ 
+-/** Упрощённый Telex: aa→â, aw→ă, ee→ê, oo→ô, ow→ơ, uw/w→ư, dd→đ; s f r x j — тоны, z — убрать тон. */
++/**
++ * Telex: aa→â, aw→ă, ee→ê, oo→ô, ow→ơ, uw/w→ư, uow→ươ, dd→đ; s f r x j — тоны, z — убрать тон.
++ * Итог принимается, только если он похож на вьетнамский слог (начало + ядро + конец): английские слова
++ * («clipboard», «window», «text») остаются как набраны, а не превращаются в «clipbỏad».
++ */
+ object Telex {
+     private const val BASE = "aăâeêioôơuưy"
++    private const val DIACRITIC = "ăâêôơư"
+     private val TONES = listOf(
+         "aăâeêioôơuưy",
+         "áắấéếíóốớúứý", // s
+@@ -614,7 +619,17 @@
+         "ãẵẫẽễĩõỗỡũữỹ", // x
+         "ạặậẹệịọộợụựỵ"  // j
+     )
+-    private val TONE_KEYS = "sfrxj"
++    private const val TONE_KEYS = "sfrxj"
++    private val INITIALS = setOf(
++        "", "b", "c", "ch", "d", "đ", "g", "gh", "gi", "h", "k", "kh", "l", "m", "n", "ng", "ngh", "nh",
++        "p", "ph", "qu", "r", "s", "t", "th", "tr", "v", "x"
++    )
++    private val NUCLEI = (
++        "a ă â e ê i o ô ơ u ư y ai ao au ay âu ây eo êu ia iê iu oa oă oe oi ôi ơi ua uâ uê ui uô uy ưa ưi ươ ưu yê " +
++            "iêu yêu oai oay oao oeo uây uôi ươi ươu uyê uyu uya uơ oo"
++        ).split(' ').toSet()
++    private val FINALS = setOf("", "c", "ch", "m", "n", "ng", "nh", "p", "t")
++    private val STOPS = setOf("c", "ch", "p", "t")
+ 
+     private fun splitTone(c: Char): Pair<Char, Int> {
+         val lower = c.lowercaseChar()
+@@ -633,14 +648,30 @@
+ 
+     private fun isVowel(c: Char) = splitTone(c).first in BASE
+ 
++    /** Набранные клавиши → слово. Если получился не вьетнамский слог — слово остаётся как набрано. */
+     fun compose(raw: String): String {
++        val out = transform(raw)
++        return if (out == raw || isSyllable(out)) out else raw
++    }
++
++    private fun transform(raw: String): String {
+         val w = StringBuilder()
++        // после отмены тона (повтор клавиши) остальные клавиши тона в слове — просто буквы: «ass», «issue»
++        var plain = false
+         for (ch in raw) {
+             val lower = ch.lowercaseChar()
+             val up = ch.isUpperCase()
+             val last = w.lastOrNull()
+             val (lastBase, lastTone) = last?.let { splitTone(it) } ?: (' ' to -1)
+             val lastUp = last?.isUpperCase() == true
++            // uow → ươ (кроме «qu»: «quơ»)
++            if (lower == 'w' && lastBase == 'o' && w.length >= 2 && w[w.length - 2].lowercaseChar() == 'u' &&
++                !(w.length >= 3 && w[w.length - 3].lowercaseChar() == 'q')
++            ) {
++                w.setCharAt(w.length - 2, if (w[w.length - 2].isUpperCase()) 'Ư' else 'ư')
++                w.setCharAt(w.length - 1, withTone('ơ', lastTone, lastUp))
++                continue
++            }
+             val mod: Char? = when {
+                 lower == 'a' && lastBase == 'a' -> 'â'
+                 lower == 'w' && lastBase == 'a' -> 'ă'
+@@ -659,15 +690,17 @@
+                 continue
+             }
+             val tone = TONE_KEYS.indexOf(lower) + 1
+-            if ((tone > 0 || lower == 'z') && w.any { isVowel(it) }) {
++            if (!plain && (tone > 0 || lower == 'z') && w.any { isVowel(it) }) {
+                 val pos = tonePosition(w)
+-                if (pos >= 0) {
++                // «z» без тона — обычная буква («pizza»)
++                if (pos >= 0 && !(lower == 'z' && splitTone(w[pos]).second == 0)) {
+                     val (b, cur) = splitTone(w[pos])
+                     val target = if (lower == 'z') 0 else tone
+                     if (cur == target && target != 0) {
+                         // повтор тона — снять его и напечатать букву
+                         w.setCharAt(pos, withTone(b, 0, w[pos].isUpperCase()))
+                         w.append(ch)
++                        plain = true
+                     } else w.setCharAt(pos, withTone(b, target, w[pos].isUpperCase()))
+                     continue
+                 }
+@@ -681,7 +714,35 @@
+         return w.toString()
+     }
+ 
+-    /** Куда ставить тон: на ăâêôơư, иначе по правилам кластера гласных (qu/gi — не гласные). */
++    /** Похоже ли на вьетнамский слог: начало, ядро и конец из допустимых, не больше одного тона, на c/ch/p/t — только ´ и ̣. */
++    private fun isSyllable(s: String): Boolean {
++        val b = StringBuilder()
++        var tone = 0
++        var marked = 0
++        for (c in s.lowercase()) {
++            val (base, t) = splitTone(c)
++            b.append(base)
++            if (t > 0) { tone = t; marked++ }
++        }
++        if (marked > 1) return false
++        val w = b.toString()
++        var i = 0
++        while (i < w.length && w[i] !in BASE) i++
++        var ini = w.substring(0, i)
++        var j = i
++        if (ini == "q" && j < w.length && w[j] == 'u') { ini = "qu"; j++ }
++        else if (ini == "g" && j + 1 < w.length && w[j] == 'i' && w[j + 1] in BASE) { ini = "gi"; j++ }
++        if (ini !in INITIALS) return false
++        var k = j
++        while (k < w.length && w[k] in BASE) k++
++        val nucleus = w.substring(j, k)
++        val fin = w.substring(k)
++        if (nucleus.isEmpty()) return fin.isEmpty()
++        if (nucleus !in NUCLEI || fin !in FINALS) return false
++        return !(fin in STOPS && tone in 2..4)
++    }
++
++    /** Куда ставить тон: на ăâêôơư (в «ươ» — на ơ), иначе по правилам кластера гласных (qu/gi — не гласные). */
+     private fun tonePosition(w: CharSequence): Int {
+         val s = w.toString().lowercase()
+         var start = 0
+@@ -691,7 +752,7 @@
+         if (end < start) return -1
+         var begin = end
+         while (begin - 1 >= start && isVowel(s[begin - 1])) begin--
+-        for (i in begin..end) if (splitTone(s[i]).first in "ăâêôơư") return i
++        for (i in end downTo begin) if (splitTone(s[i]).first in DIACRITIC) return i
+         val cluster = end - begin + 1
+         val closed = end < s.length - 1
+         return when {
+diff -ruN a/app/src/main/java/com/expressive/keyboard/Panels.kt b/app/src/main/java/com/expressive/keyboard/Panels.kt
+--- a/app/src/main/java/com/expressive/keyboard/Panels.kt	2026-10-31 03:33:27.377120224 +0000
++++ b/app/src/main/java/com/expressive/keyboard/Panels.kt	2026-10-31 03:33:35.039197807 +0000
+@@ -583,11 +583,11 @@
+     }
+ }
+ 
+-/** Нажатие — вставить, ✕ — удалить запись, 📌 (или долгое нажатие) — закрепить: закреплённые не стираются «Очистить». */
++/** Нажатие — вставить, ✕ — удалить запись, 📌 (или долгое нажатие) — закрепить: закреплённые не стираются «Очистить» и стоят внизу списка. */
+ @Composable
+ internal fun ClipboardPanel(state: KeyboardState, actions: KeyboardActions, palette: KeyPalette, font: FontFamily) {
+     val pinned = state.pinnedClips.toList()
+-    val items = pinned + state.clipboard.filter { it !in pinned }
++    val items = state.clipboard.filter { it !in pinned } + pinned
+     Column(
+         modifier = Modifier.fillMaxSize().panelSurface(palette).padding(10.dp),
+         verticalArrangement = Arrangement.spacedBy(8.dp)
+diff -ruN a/app/src/test/java/com/expressive/keyboard/TelexTest.kt b/app/src/test/java/com/expressive/keyboard/TelexTest.kt
+--- a/app/src/test/java/com/expressive/keyboard/TelexTest.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/app/src/test/java/com/expressive/keyboard/TelexTest.kt	2026-10-31 03:33:35.041432119 +0000
+@@ -0,0 +1,41 @@
++package com.expressive.keyboard
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++/** Telex: вьетнамский набирается как раньше, а английские слова не превращаются в «clipbỏad». */
++class TelexTest {
++    @Test
++    fun vietnameseStillComposes() {
++        mapOf(
++        "nguwowif" to "người",
++        "dduwowcj" to "được",
++        "nuwowcs" to "nước",
++        "tieengs" to "tiếng",
++        "vieetj" to "việt",
++        "truwowngf" to "trường",
++        "giuwowngf" to "giường",
++        "quar" to "quả",
++        "gif" to "gì",
++        "giuwx" to "giữ",
++        "ngoaif" to "ngoài",
++        "tuooir" to "tuổi",
++        "muwowif" to "mười",
++        "ruwowuj" to "rượu",
++        "yeeu" to "yêu",
++        "khuyeen" to "khuyên",
++        "hoaf" to "hòa",
++        "queen" to "quên",
++        "nguyeenx" to "nguyễn",
++        "Hoangf" to "Hoàng",
++        "Dduwcs" to "Đức",
++            "toans" to "toán", "hoaf" to "hòa", "viee" to "viê"
++        ).forEach { (typed, word) -> assertEquals(typed, word, Telex.compose(typed)) }
++    }
++
++    @Test
++    fun englishWordsStayAsTyped() {
++        listOf("clipboard", "keyboard", "window", "text", "school", "pizza", "issue", "ass", "addition", "it's", "program")
++            .forEach { assertEquals(it, it, Telex.compose(it)) }
++    }
++}
